@@ -54,6 +54,20 @@ jobs:
             du -sh out/* | sort -h >> $GITHUB_STEP_SUMMARY || true
           fi
 
+      - name: Peek rootfs
+        if: always()
+        shell: bash
+        run: |
+          root=$(ls -d out/*_rootfs 2>/dev/null | head -1)
+          if [ -n "$root" ]; then
+            echo "### rootfs top level ($root)" >> $GITHUB_STEP_SUMMARY
+            ls -la "$root" >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+            echo "### etc/init.d count" >> $GITHUB_STEP_SUMMARY
+            ls "$root/etc/init.d" 2>/dev/null | head -40 >> $GITHUB_STEP_SUMMARY || true
+            echo "### www" >> $GITHUB_STEP_SUMMARY
+            ls -la "$root/www" 2>/dev/null >> $GITHUB_STEP_SUMMARY || true
+          fi
+
       - name: Upload artifact
         if: always()
         uses: actions/upload-artifact@v4

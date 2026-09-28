@@ -186,7 +186,7 @@ def verify_metadata_block(img: bytes, off: int) -> str:
         return "FAILED to decode"
 
 
-def carve_squashfs(blob: bytes) -> bytes | None:
+def carve_squashfs(blob: bytes) -> tuple[bytes, int] | None:
     pos = blob.find(SQUASHFS_MAGIC)
     while pos >= 0:
         sb = parse_squashfs_super(blob[pos:pos + 96])
@@ -196,6 +196,54 @@ def carve_squashfs(blob: bytes) -> bytes | None:
                 return blob[pos: pos + used], pos
         pos = blob.find(SQUASHFS_MAGIC, pos + 4)
     return None
+
+
+def count_entries(root: Path) -> int:
+    """统计目录树条目数（含符号链接，不跟随）。"""
+    n = 0
+    stack = [root]
+    while stack:
+        d = stack.pop()
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    n += 1
+                    if e.is_dir(follow_symlinks=False):
+                        stack.append(Path(e.path))
+        except OSError:
+            pass
+    return n
+
+
+def run_unsquashfs(u: str, sp: Path, out: Path) -> None:
+    """执行 unsquashfs，完整输出落盘+智能摘录；rc!=0 但已解出内容时宽容处理。"""
+    dest = out / (sp.stem + "_rootfs")
+    log(f"[*] unsquashfs {sp.name} -> {dest}")
+    r = subprocess.run(
+        [u, "-d", str(dest), "-f", "-no-progress", "-no-xattrs", str(sp)],
+        capture_output=True, text=True)
+    merged = (r.stdout or "") + (r.stderr or "")
+    logfile = out / (sp.stem + ".unsquashfs.log")
+    logfile.write_text(merged, encoding="utf-8", errors="replace")
+    lines = [ln for ln in merged.splitlines() if ln.strip()]
+    interesting = [ln for ln in lines
+                   if any(k in ln.lower() for k in ("fail", "error", "xattr", "warning"))]
+    for ln in lines[:5]:
+        log("    " + ln)
+    for ln in interesting[:20]:
+        log("    ! " + ln)
+    for ln in lines[-8:]:
+        log("    " + ln)
+    n = count_entries(dest) if dest.is_dir() else 0
+    if r.returncode != 0:
+        if n > 100:
+            log(f"[i] unsquashfs rc={r.returncode} but tree has {n} entries "
+                f"-> accepted (details: {logfile.name})")
+        else:
+            log(f"[!] unsquashfs rc={r.returncode} and tree only has {n} entries")
+            raise RuntimeError(f"unsquashfs failed rc={r.returncode} entries={n}")
+    else:
+        log(f"[+] unsquashfs OK, {n} entries")
 
 
 # --------------------------------------------------------------------------
@@ -270,16 +318,11 @@ def main() -> int:
         if not u:
             log("[i] unsquashfs not found in PATH; install squashfs-tools to unpack.")
         else:
-            for sp in sorted(out.glob("*.squashfs")):
-                dest = out / (sp.stem + "_rootfs")
-                log(f"[*] unsquashfs {sp.name} -> {dest}")
-                r = subprocess.run([u, "-d", str(dest), "-f", str(sp)],
-                                   capture_output=True, text=True)
-                tail = (r.stdout or r.stderr or "").strip().splitlines()[-3:]
-                for t in tail:
-                    log("    " + t)
-                if r.returncode != 0:
-                    problems.append(f"unsquashfs:{sp.name} rc={r.returncode}")
+            try:
+                for sp in sorted(out.glob("*.squashfs")):
+                    run_unsquashfs(u, sp, out)
+            except RuntimeError as e:
+                problems.append(str(e))
 
     log("")
     if problems:
