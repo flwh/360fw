@@ -1,0 +1,64 @@
+name: extract-360t7
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq squashfs-tools file
+
+      - name: Firmware info
+        run: |
+          ls -l 360T7.bin
+          md5sum 360T7.bin
+          file 360T7.bin || true
+
+      - name: Extract firmware (UBI rebuild + squashfs carve)
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p out
+          python3 extract_fw.py 360T7.bin -o out | tee out/extract.log
+
+      - name: Pack rootfs tarball (keep symlinks)
+        if: always()
+        shell: bash
+        run: |
+          shopt -s nullglob
+          for d in out/*_rootfs; do
+            [ -d "$d" ] || continue
+            name=$(basename "$d")
+            tar -C "$d" -czf "out/${name}.tar.gz" .
+            echo "packed out/${name}.tar.gz"
+          done
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          echo "### 360T7 extract summary" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          ls -lh out/ 2>/dev/null >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          if [ -d out ]; then
+            du -sh out/* | sort -h >> $GITHUB_STEP_SUMMARY || true
+          fi
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 360t7-extracted
+          path: out/**
+          retention-days: 30
+          if-no-files-found: warn
